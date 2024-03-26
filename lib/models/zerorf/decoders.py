@@ -12,6 +12,7 @@ import mcubes
 import trimesh
 import matplotlib.pyplot as plotlib
 
+from .cuda_gridsample import grid_sample_2d
 
 class DepthRegularizer(nn.Module):
     noise: torch.Tensor
@@ -74,8 +75,12 @@ class CommonDecoder(nn.Module):
         self.dir_encoder = SHEncoder(degree=3)
         self.base_net = nn.Linear(point_channels, 64)
         self.base_activation = nn.SiLU()
-        if sdf_mode:
+        if sdf_mode == 'neus':
             self.variance = nn.Parameter(torch.tensor(0.3))
+            self.variance_act = TruncExp()
+            self.density_net = nn.Linear(64, 1)
+        elif sdf_mode == 'volsdf':
+            self.variance = nn.Parameter(torch.tensor(0.1))
             self.variance_act = TruncExp()
             self.density_net = nn.Linear(64, 1)
         else:
@@ -113,11 +118,16 @@ class CommonDecoder(nn.Module):
         base_x = self.base_net(point_code)
         base_x_act = self.base_activation(base_x)
         sigmas = self.density_net(base_x_act).squeeze(-1)
-        if self.sdf_mode:
-            if not out_sdf:
+        sdfs = sigmas
+        if not out_sdf:
+            if self.sdf_mode == 'neus':
+                # NeuS, sdf to density
                 s = self.variance_act(10 * self.variance).clamp(1e-6, 1e6)
-                cov = self.variance_act(-s * sigmas).clamp(1e-6, 1e6)
+                cov = self.variance_act(-s * sdfs).clamp(1e-6, 1e6)
                 sigmas = s * cov / (1 + cov) ** 2
+            elif self.sdf_mode == 'volsdf':
+                s = torch.reciprocal(self.variance).clamp(1e-6, 1e6)
+                sigmas = F.relu(s * (0.5 + 0.5 * torch.sign(-sdfs) * (1 - torch.exp(-torch.abs(-sdfs) * s))))
         if dirs is None:
             rgbs = None
         else:
@@ -135,7 +145,7 @@ class CommonDecoder(nn.Module):
                 rgbs = self.color_net(color_in)
                 if self.sigmoid_saturation > 0:
                     rgbs = rgbs * (1 + self.sigmoid_saturation * 2) - self.sigmoid_saturation
-        return sigmas, rgbs
+        return sigmas, rgbs, sdfs
 
 
 @MODULES.register_module()
@@ -204,7 +214,9 @@ class TensorialDecoder(PointBasedVolumeRenderer):
             coords = xyzs[..., ['xyzt'.index(axis) for axis in cfg]]
             coords = coords.reshape(code.shape[0], 1, xyzs.shape[-2], 2)
             codes.append(
-                F.grid_sample(got, coords, mode='bilinear', padding_mode='border', align_corners=False)
+                # F.grid_sample(got, coords, mode='bilinear', padding_mode='border', align_corners=False)
+                # .reshape(code.shape[0], got.shape[1], xyzs.shape[-2]).transpose(1, 2)
+                grid_sample_2d(got, coords, padding_mode='border', align_corners=False)
                 .reshape(code.shape[0], got.shape[1], xyzs.shape[-2]).transpose(1, 2)
             )
         codes_subred = []
@@ -306,7 +318,9 @@ class FreqFactorizedDecoder(TensorialDecoder):
                 coords = ((coords % band) / (band / 2) - 1)
             coords = coords.reshape(code.shape[0], 1, 1, xyzs.shape[-2], 3)
             codes.append(
-                F.grid_sample(got, coords, mode='bilinear', padding_mode='border', align_corners=False)
+                # F.grid_sample(got, coords, mode='bilinear', padding_mode='border', align_corners=False)
+                # .reshape(code.shape[0], got.shape[1], xyzs.shape[-2]).transpose(1, 2)
+                grid_sample_2d(got, coords, mode='bilinear', padding_mode='border', align_corners=False)
                 .reshape(code.shape[0], got.shape[1], xyzs.shape[-2]).transpose(1, 2)
             )
         codes_subred = []

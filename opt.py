@@ -9,12 +9,13 @@ def config_parser(cmd=None):
                         help='experiment name')
     parser.add_argument("--wandb-project", type=str, 
                         default="zerorf", help='wandb project name')
+    parser.add_argument("--wandb-disable", action='store_true', help='wandb disable flag')
     
     # data
     parser.add_argument("--dataset", type=str, 
                         default="nerf_syn", help='type of dataset')
     parser.add_argument("--data-dir", type=str, 
-                        default="/root/nerf_synthetic", help='directory of the dataset')
+                        default="../../../../data/nerf_synthetic", help='directory of the dataset')
     parser.add_argument("--obj", type=str, 
                         default="chair", help='object name')
     parser.add_argument("--n-views", type=int, 
@@ -26,14 +27,21 @@ def config_parser(cmd=None):
     parser.add_argument("--model-ch", type=int, 
                         default=8, help='noise channel')
     parser.add_argument("--n-rays-init", type=int, 
-                        default=2**12, help='number of rays per batch initially')
+                        default=2**10, help='number of rays per batch initially')
     parser.add_argument("--n-rays-up", type=int, 
-                        default=2**16, help='number of rays per batch after 100 iterations')
+                        default=2**14, help='number of rays per batch after 100 iterations')
+    # parser.add_argument("--n-rays-init", type=int, 
+    #                     default=2**12, help='number of rays per batch initially')
+    # parser.add_argument("--n-rays-up", type=int, 
+    #                     default=2**16, help='number of rays per batch after 100 iterations')
     parser.add_argument("--learn-bg", action='store_true', help='if learn background')
     parser.add_argument("--bg-color", type=float, 
                         default=1.0, help='background color')
     parser.add_argument("--rep", type=str, choices=['dif', 'tensorf'],
                         default="dif", help="representation to use")
+    parser.add_argument("--sdf-mode", type=str,
+                        default="", help='define sdf mode, default void string for density mode')
+    parser.add_argument("--loss-eik", type=float, default=0.1, help='eikonal loss weight')
     
     # training
     parser.add_argument("--net-lr", type=float, 

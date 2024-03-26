@@ -262,6 +262,9 @@ class MultiSceneNeRF(BaseNeRF):
                 log_vars.update(self.eval_and_viz(
                     data, self.decoder, code, density_bitfield, cfg=self.train_cfg))
 
+        if self.decoder.sdf_mode:
+            log_vars.update(variance=self.decoder.common_decoder.variance.item())
+
         # ==== outputs ====
         outputs_dict = dict(
             log_vars=log_vars, num_samples=num_scenes)

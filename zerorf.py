@@ -143,7 +143,7 @@ decoder_1 = dict(
     reduce='cat',
     separate_density_and_color=False,
     sh_coef_only=False,
-    sdf_mode=False,
+    sdf_mode=args.sdf_mode,
     max_steps=1024 if not args.load_image else 320,
     n_images=args.n_views,
     image_h=pic_h,
@@ -162,7 +162,7 @@ decoder_2 = dict(
     reduce='cat',
     separate_density_and_color=False,
     sh_coef_only=False,
-    sdf_mode=False,
+    sdf_mode=args.sdf_mode,
     max_steps=1024 if not args.load_image else 640,
     n_images=args.n_views,
     image_h=pic_h,
@@ -190,7 +190,8 @@ nerf: MultiSceneNeRF = build_model(dict(
         type='MSELoss',
         loss_weight=3.2
     ),
-    use_lpips_metric=torch.cuda.mem_get_info()[1] // 1000 ** 3 >= 32,
+    # use_lpips_metric=torch.cuda.mem_get_info()[1] // 1000 ** 3 >= 32,
+    use_lpips_metric=True,
     cache_size=1,
     cache_16bit=False,
     init_from_mean=True
@@ -201,6 +202,7 @@ nerf: MultiSceneNeRF = build_model(dict(
     n_inverse_rays=args.n_rays_init,
     n_decoder_rays=args.n_rays_init,
     loss_coef=0.1 / (pic_h * pic_w),
+    loss_eik=args.loss_eik,
     optimizer=dict(type='Adam', lr=0, weight_decay=0.),
     lr_scheduler=dict(type='ExponentialLR', gamma=0.99),
     cache_load_from=None,
@@ -228,9 +230,11 @@ optim = build_optimizers(nerf, dict(decoder=dict(type='AdamW', lr=args.net_lr, f
 lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim['decoder'], args.n_iters, eta_min=args.net_lr_decay_to)
 
 wandb.init(
+    mode="disabled" if args.wandb_disable else None,
     project=args.wandb_project,
+    entity='fast-avatar',
     name=args.proj_name,
-    save_code=True,
+    # save_code=True,
     config=dict(selected_idxs=selected_idxs)
 )
 prog = tqdm.trange(args.n_iters)
@@ -240,7 +244,7 @@ for j in prog:
     lv = nerf.train_step(data_entry, optim)['log_vars']
     lr_sched.step()
     lv.pop('code_rms')
-    lv.pop('loss')
+    # lv.pop('loss')
     prog.set_postfix(**lv)
     wandb.log(dict(train=lv))
     if j == 50:
@@ -257,7 +261,7 @@ for j in prog:
             with torch.no_grad():
                 if os.path.exists("viz"):
                     shutil.rmtree("viz")
-                log_vars, _ = nerf.eval_and_viz(
+                log_vars, imgs_val = nerf.eval_and_viz(
                     val_entry, nerf.decoder,
                     cache['param']['code_'][None].to(device),
                     cache['param']['density_bitfield'][None].to(device),
@@ -268,6 +272,16 @@ for j in prog:
             print(log_vars)
             wandb.log(dict(val=log_vars))
             this_psnr = log_vars['test_psnr']
+            
+            # also log the images
+            imgs_val = imgs_val.permute(0, 1, 3, 4, 2)
+            images = [wandb.Image(imgs_val[:,i].cpu().numpy(), 
+                                  caption=f'val{i}')
+                      for i in range(imgs_val.shape[1])]
+            wandb.log({
+                'val_images': images
+            })
+
         if args.load_image or this_psnr >= best_psnr or j == len(prog) - 1:
             torch.save(nerf.state_dict(), open("nerf-zerorf.pt", "wb"))
             best_psnr = this_psnr if not args.load_image else 0
@@ -317,7 +331,7 @@ for j in prog:
                     )
                     wandb.log(dict(train_final=log_vars))
                     if not args.load_image:
-                        log_vars, _ = nerf.eval_and_viz(
+                        log_vars, imgs_test = nerf.eval_and_viz(
                             test_entry, nerf.decoder,
                             cache['param']['code_'][None].to(device),
                             cache['param']['density_bitfield'][None].to(device),
@@ -328,4 +342,13 @@ for j in prog:
                         print('Final test:')
                         print(log_vars)
                         wandb.log(dict(test=log_vars))
+
+                        # also log the images
+                        imgs_test = imgs_test.permute(0, 1, 3, 4, 2)
+                        images = [wandb.Image(imgs_test[:,i].cpu().numpy(), 
+                                            caption=f'test{i}')
+                                for i in range(imgs_test.shape[1])]
+                        wandb.log({
+                            'test_images': images
+                        })
             out.release()

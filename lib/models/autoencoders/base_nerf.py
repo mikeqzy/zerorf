@@ -363,10 +363,17 @@ class BaseNeRF(nn.Module):
             decoder_reg_loss = outputs['decoder_reg_loss']
             loss = loss + decoder_reg_loss
             loss_dict.update(decoder_reg_loss=decoder_reg_loss)
+        if decoder.sdf_mode:
+            lambda_eik = cfg.get('loss_eik', 0.1)
+            grads = outputs['grads']
+            assert grads.sum() != 0.
+            loss_eikonal = ((torch.linalg.norm(grads, ord=2, dim=-1) - 1.) ** 2).mean() * lambda_eik
+            loss = loss + loss_eikonal
+            loss_dict.update(eikonal_loss=loss_eikonal)
+
         return (out_rgbs, target_rgbs), loss, loss_dict
 
-    def loss_decoder(self, decoder, code, density_bitfield, cond_rays_o, cond_rays_d,
-                     cond_imgs, cond_times=None, dt_gamma=0.0, cfg=dict(), **kwargs):
+    def loss_decoder(self, decoder, code, density_bitfield, cond_rays_o, cond_rays_d, cond_imgs, cond_times=None, dt_gamma=0.0, cfg=dict(), **kwargs):
         decoder_training_prev = decoder.training
         decoder.train(True)
         n_decoder_rays = cfg.get('n_decoder_rays', 4096)

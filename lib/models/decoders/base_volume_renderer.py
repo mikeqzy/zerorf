@@ -230,7 +230,7 @@ class VolumeRenderer(nn.Module):
             xyzs = xyzs / 2.0
             xyzs, dirs, ts, rays = [xyzs], [dirs], [ts.contiguous()], [rays.contiguous()]
             with torch.no_grad():
-                sigmas, rgbs, num_points = self.point_decode(xyzs, None, code)
+                sigmas, rgbs, num_points, _ = self.point_decode(xyzs, None, code)
             rgbs = sigmas.new_zeros(sigmas.shape[0], 3)
             with torch.no_grad():
                 if sigmas.dtype != dtype or rgbs.dtype != dtype:
@@ -247,7 +247,7 @@ class VolumeRenderer(nn.Module):
                 xyzs_filt.append(xyzs_single[blk])
                 dirs_filt.append(dirs_single[blk])
                 occls_filt.append(blk)
-            sigmas_occl, rgbs_occl, _ = self.point_decode(xyzs_filt, dirs_filt, code)
+            sigmas_occl, rgbs_occl, _, grad = self.point_decode(xyzs_filt, dirs_filt, code, return_grad=self.sdf_mode)
             sigmas = torch.zeros_like(sigmas)
             occl = torch.cat(occls_filt)
             sigmas[occl] = sigmas_occl
@@ -278,7 +278,7 @@ class VolumeRenderer(nn.Module):
                 rays.append(rays_single)
             if self.occlusion_culling_th > 0:
                 with torch.no_grad():
-                    sigmas, rgbs, num_points = self.point_decode(xyzs, None, code)
+                    sigmas, rgbs, num_points, _ = self.point_decode(xyzs, None, code)
                 rgbs = sigmas.new_zeros(sigmas.shape[0], 3)
                 with torch.no_grad():
                     if sigmas.dtype != dtype or rgbs.dtype != dtype:
@@ -295,7 +295,7 @@ class VolumeRenderer(nn.Module):
                     xyzs_filt.append(xyzs_single[blk])
                     dirs_filt.append(dirs_single[blk])
                     occls_filt.append(blk)
-                sigmas_occl, rgbs_occl, _ = self.point_decode(xyzs_filt, dirs_filt, code)
+                sigmas_occl, rgbs_occl, _, grads = self.point_decode(xyzs_filt, dirs_filt, code, return_grad=self.sdf_mode)
                 sigmas = torch.zeros_like(sigmas)
                 occl = torch.cat(occls_filt)
                 sigmas[occl] = sigmas_occl
@@ -304,7 +304,7 @@ class VolumeRenderer(nn.Module):
                     sigmas, rgbs = sigmas.to(dtype), rgbs.to(dtype)
                 weights, weights_sum, depth, image = batch_composite_rays_train(sigmas, rgbs, ts, rays, num_points)
             else:
-                sigmas, rgbs, num_points = self.point_decode(xyzs, dirs, code)
+                sigmas, rgbs, num_points, grads = self.point_decode(xyzs, dirs, code, return_grad=self.sdf_mode)
                 weights, weights_sum, depth, image = batch_composite_rays_train(sigmas.to(dtype), rgbs.to(dtype), ts, rays, num_points)
 
         else:
@@ -347,7 +347,7 @@ class VolumeRenderer(nn.Module):
                     if rays_time_single is not None:
                         times = rays_time_single.repeat(1, n_step).reshape(-1, 1)
                         xyzs = torch.cat([xyzs, times], dim=-1)
-                    sigmas, rgbs, _ = self.point_decode([xyzs], [dirs], code_single[None])
+                    sigmas, rgbs, _, grads = self.point_decode([xyzs], [dirs], code_single[None])
                     if self.pre_gamma is not None:
                         rgbs = rgbs ** self.pre_gamma
                     composite_rays(
@@ -373,6 +373,7 @@ class VolumeRenderer(nn.Module):
 
         if return_loss:
             results.update(sigmas=sigmas, rgbs=rgbs)
+            results.update(grads=grads)
             results.update(decoder_reg_loss=self.loss(results))
 
         return results
@@ -386,7 +387,7 @@ class PointBasedVolumeRenderer(VolumeRenderer):
     def point_code_render(self, point_code, dirs):
         raise NotImplementedError
 
-    def point_decode(self, xyzs, dirs, code, density_only=False):
+    def point_decode(self, xyzs, dirs, code, density_only=False, return_grad=False):
         """
         Args:
             xyzs: Shape (num_scenes, (num_points_per_scene, 3))
@@ -395,24 +396,40 @@ class PointBasedVolumeRenderer(VolumeRenderer):
         """
         num_scenes = code.size(0)
         if isinstance(xyzs, torch.Tensor):
+            if return_grad:
+                xyzs.requires_grad_(True)
             assert xyzs.dim() == 3
             num_points = xyzs.size(-2)
             point_code = self.get_point_code(code, xyzs)
             num_points = [num_points] * num_scenes
+            points = xyzs.reshape(-1, 3)
         else:
             num_points = []
             point_code = []
             for i, xyzs_single in enumerate(xyzs):
+                if return_grad:
+                    xyzs_single.requires_grad_(True)
                 num_points_per_scene = xyzs_single.size(-2)
                 point_code_single = self.get_point_code(code[i: i + 1], xyzs_single[None])
                 num_points.append(num_points_per_scene)
                 point_code.append(point_code_single)
             point_code = torch.cat(point_code, dim=0) if len(point_code) > 1 else point_code[0]
-        sigmas, rgbs = self.point_code_render(point_code, dirs)
-        return sigmas, rgbs, num_points
+            points =  torch.cat(xyzs, dim=0) if len(xyzs) > 1 else xyzs[0]
+        sigmas, rgbs, sdfs = self.point_code_render(point_code, dirs)
+
+        if return_grad:
+            assert self.sdf_mode
+            grads = torch.autograd.grad(
+                        sdfs, points, grad_outputs=torch.ones_like(sdfs),
+                        create_graph=True, retain_graph=True, only_inputs=True
+                    )[0]
+        else:
+            grads = torch.zeros_like(points)
+
+        return sigmas, rgbs, num_points, grads
 
     def point_density_decode(self, xyzs, code, **kwargs):
-        sigmas, _, num_points = self.point_decode(
+        sigmas, _, num_points, _ = self.point_decode(
             xyzs, None, code, density_only=True, **kwargs)
         return sigmas, num_points
 
